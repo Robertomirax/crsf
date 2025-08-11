@@ -1,46 +1,16 @@
-#include <Arduino.h>
+/*
+ESP32-S3 adafruit_qtpy_esp32s3_n4r2
 
-#define RXD2 16
+Lee por rxd2 (serial1) lo que envía el ESC (voltaje, corriente y mAh consumidos) a 115.200 baudios.
+Transmite por Serial (USB C) a la pantalla, los datos decodificados recibidos.
+Transmite por el pin TX (Serial0) los datos codificados en formato CRSF
+
+*/
+#include <Arduino.h>
+#define RXD2 2 // 1  //16
 #define TXD2 17
 
-u_int8_t data[64] = {200, 10, 8, 0, 112, 0, 20, 0, 0, 25, 65, 28};
-uint8_t largo = 0;
-unsigned long previousMillis = 0;
-const long interval = 10;
-
-// declaración de funciones
-void analizar(uint8_t *vector, uint8_t lar);   // analiza los datos recibidos por el puerto serie crsf
-uint8_t crc8(const uint8_t *ptr, uint8_t len); // calcula el crc de los datos recibidos por el puerto serie crsf
-
-void setup()
-{
-  // Note the format for setting a serial port is as follows: Serial2.begin(baud-rate, protocol, RX pin, TX pin);
-  Serial.begin(460800);
-  // Serial2.begin(420000, SERIAL_8N1, RXD2, TXD2);// comunicación crsf entre radio y transmisor
-  Serial2.begin(416666, SERIAL_8N1, RXD2, TXD2); // comunicación crsf entre receptor y decodificador
-
-  Serial.println();
-  Serial.println();
-  Serial.println();
-  Serial.println();
-}
-
-void loop()
-{
-
-  // espera de 10mS
-  unsigned long currentMillis = millis();
-
-  if (currentMillis - previousMillis >= interval)
-  {
-    previousMillis = currentMillis;
-
-    Serial2.write(data, 12);
-    Serial.write(data, 12);
-  }
-}
-
-// funciones------------------------------------------------------------------------------------------------------------
+#define WDT_TIMEOUT 2 // segundos de espera del Watchdog timer
 
 unsigned char crc8tab[256] = {
     0x00, 0xD5, 0x7F, 0xAA, 0xFE, 0x2B, 0x81, 0x54, 0x29, 0xFC, 0x56, 0x83, 0xD7, 0x02, 0xA8, 0x7D,
@@ -60,6 +30,76 @@ unsigned char crc8tab[256] = {
     0xD6, 0x03, 0xA9, 0x7C, 0x28, 0xFD, 0x57, 0x82, 0xFF, 0x2A, 0x80, 0x55, 0x01, 0xD4, 0x7E, 0xAB,
     0x84, 0x51, 0xFB, 0x2E, 0x7A, 0xAF, 0x05, 0xD0, 0xAD, 0x78, 0xD2, 0x07, 0x53, 0x86, 0x2C, 0xF9};
 
+u_int8_t datain[64] = {};
+uint8_t largoin = 0;
+u_int8_t dataout[64] = {};
+uint8_t largoout = 0;
+
+unsigned long previousMillis = 0;
+const long interval = 20; // milisegundos
+
+// declaración de funciones
+void analizar1(uint8_t *vector, uint8_t lar);  // analiza la información recibida y arma el vector a transmitir al receptor
+void analizar2(uint8_t *vector, uint8_t lar);  // analiza la informaciónde RPM recibidos y arma el vector a transmitir al receptor
+uint8_t crc8(const uint8_t *ptr, uint8_t len); // calcula el crc de los datos recibidos por el puerto serie crsf
+void analizar3(uint8_t *vector, uint8_t lar);  // analiza la información de Temperatura recibida y arma el vector a transmitir al receptor
+void muestraPan(uint8_t *vector, uint8_t lar); // muestra en pantalla los datos recibidos y el cheksum
+
+void setup()
+{
+  // inicialización del watchdog timer
+  // esp_task_wdt_init(WDT_TIMEOUT, true); // habilita el reseteo del chip cuando se activa el wdt
+  // esp_task_wdt_add(NULL);
+
+  Serial.begin(115200);                          // comunicación por el conector USB C
+  Serial1.begin(115200, SERIAL_8N1, RXD2, TXD2); // inicia comunicación con esc (recibe)
+  Serial0.begin(420000, SERIAL_8N1, -1, -1);     // inicia comunicación crsf con el receptor (transmite). El Serial0 tiene conexión fija a los pines TX y RX
+
+  Serial.println();
+  Serial.println();
+  Serial.println();
+  Serial.println();
+}
+
+void loop()
+{
+  // reseteo del wdt
+  // esp_task_wdt_reset();
+
+  if (Serial1.available())
+  {
+
+    largoin = Serial1.available(); // obtiene la longitud del vector recibido
+
+    Serial1.readBytes(datain, largoin); // lee los datos provenientes del speed control
+
+    analizar1(datain, largoin); // analiza la informaciónde voltaje, corriente y mAh consumidos recibidos y arma el vector a transmitir al receptor
+    Serial0.write(dataout, 12); // envía datos por crsf al receptor
+
+    analizar2(datain, largoin); // aanaliza la informaciónde RPM recibidos y arma el vector a transmitir al receptor
+    Serial0.write(dataout, 8); // envía datos por crsf al receptor
+
+    analizar3(datain, largoin); // // analiza la información de Temperatura recibida y arma el vector a transmitir al receptor
+    Serial0.write(dataout, 8); // envía datos por crsf al receptor
+
+    // muestra en pantalla los datos recibidos y el cheksum
+    muestraPan(datain, largoin);
+    
+  }
+}
+
+
+
+
+
+
+
+
+
+
+// funciones------------------------------------------------------------------------------------------------------------
+
+// calcula el crc8 de un vector descartando los dos primeros y el último byte
 uint8_t crc8(const uint8_t *ptr, uint8_t len)
 {
   *ptr++;
@@ -71,39 +111,209 @@ uint8_t crc8(const uint8_t *ptr, uint8_t len)
   return crc;
 }
 
-void analizar(uint8_t *vector, uint8_t lar)
+// analiza la informaciónde voltaje, corriente y mAh consumidos recibidos y arma el vector a transmitir al receptor
+void analizar1(uint8_t *vector, uint8_t lar)
 {
-  // Serial.println();
-  for (size_t i = 0; i < lar; i++)
+
+  // armar dataout
+  dataout[0] = 0xC8;      // Syn byte
+  dataout[1] = 10;        // largo del vector
+  dataout[2] = 0x08;      // Type
+  dataout[3] = vector[3]; // Voltaje byte alto
+  dataout[4] = vector[4]; // Voltaje byte bajo
+
+  dataout[5] = vector[5]; // corriente byte alto
+  dataout[6] = vector[6]; // corriente byte bajo
+
+  dataout[7] = 0; // capacidad usada en mAh byte alto
+  dataout[8] = vector[15]; // capacidad usada en mAh byte medio
+  dataout[9] = vector[16]; // capacidad usada en mAh byte bajo
+
+  dataout[10] = 0; // Battery remaining (percent)
+
+  // cálculo del crc8
+  uint8_t crc = crc8(dataout, 12);
+  // Serial.print("    crc calculado ->");
+  // Serial.print(crc, DEC);
+  dataout[11] = crc; // crc calculado
+}
+
+// analiza la informaciónde RPM recibidos y arma el vector a transmitir al receptor
+void analizar2(uint8_t *vector, uint8_t lar)
+{
+
+  // armar dataout
+  dataout[0] = 0xC8;      // Sync byte
+  dataout[1] = 6;         // largo del vector
+  dataout[2] = 0x0C;      // Type
+  dataout[3] = 0;         // id del motor
+  dataout[4] = 0;         // 0;         // RPM byte alto
+  dataout[5] = vector[8]; // RPM byte medio
+  dataout[6] = vector[9]; // rpm byte bajo
+ 
+  // cálculo del crc8
+  uint8_t crc = crc8(dataout, 8);
+  dataout[7] = crc; // crc calculado
+}
+
+// analiza la información de Temperatura recibida y arma el vector a transmitir al receptor
+void analizar3(uint8_t *vector, uint8_t lar)
+{
+  // obtener temperatura 
+  int16_t temp = vector[10] * 10;
+  int8_t temph = (temp >> 8) & 0xFF ;
+  int8_t tempL = temp & 0xFF;
+  // armar dataout
+  dataout[0] = 0xC8;   // Sync byte
+  dataout[1] = 5;     // largo del vector
+  dataout[2] = 0x0D;  // Type
+  dataout[3] = 0;     // origen
+  dataout[4] = temph;     // temp byte alto
+  dataout[5] = tempL; // MOS temp byte bajo
+  dataout[6] = 0;     // espacio para el crc8
+
+  // cálculo del crc8
+  uint8_t crc = crc8(dataout, 7);
+  dataout[6] = crc; // crc calculado
+}
+
+
+// muestra en pantalla los datos recibidos y el cheksum
+void muestraPan(uint8_t *vector, uint8_t lar)
+{
+
+  
+  int16_t sum = 0;
+  for (size_t i = 0; i < largoin; i++)
   {
-    // Serial.println(vector[i], DEC);
+    Serial.print("-");
+    Serial.print(datain[i], HEX);
   }
 
-  uint8_t crc = crc8(vector, lar);
-  Serial.print("crc calculado ->");
-  Serial.println(crc, DEC);
-  // Serial.print("crc recibido ->");
-  // Serial.println(vector[lar - 1]);
-
-  if (crc == vector[lar - 1])
+  for (size_t i = 0; i < 29; i++)
   {
-    for (size_t i = 0; i < lar; i++)
-    {
-      Serial.println(vector[i], DEC);
-    }
-
-    Serial.println();
-    // Serial.println("crc OK");
-    // Serial.print("canal1 ->");
-    // Serial.println(vector[3], DEC);
-    /*
-    uint8_t parte1 = vector[3];
-    uint8_t parte2 = vector[4];
-    parte2 = parte2 & 0b00000111;
-    int canal1 = (parte2 * 256) + parte1;
-    Serial.println(canal1, DEC);
-
-    Serial.println();
-    */
+    sum += datain[i];
   }
+  Serial.print(" ------------ ");
+  Serial.println(sum);
+
+  // muestra Voltaje  10-1V, data range: 0 ? 0x3e8  100V
+  int16_t volt = datain[3] * 256 + datain[4];
+  Serial.print("Voltaje ");
+  Serial.println(volt);
+
+  // muestra Corriente 10-1A, data range: 0 ? 0x1388 500A
+  int16_t amp = datain[5] * 256 + datain[6];
+  Serial.print("Corriente ");
+  Serial.println(amp);
+
+  // muestra Throttle-PCT 0x01-1%, data range: 0 ? 0x64  100% input
+  int16_t thr = datain[7];
+  Serial.print("Throttle-PCT ");
+  Serial.println(thr);
+
+  // muestra RPM  0x01-10RPM, data range: 0 ? 0xffff
+  int16_t rpm = datain[8] * 256 + datain[9];
+  Serial.print("RPM ");
+  Serial.println(rpm);
+
+  // muestra Mos-temp  0x01 ? 1?, data range: 0 ?0x96 150?
+  int16_t mos = datain[10];
+  Serial.print("Mos-temp ");
+  Serial.println(mos);
+
+  // muestra Motor-temp  0x01 ? 1?, data range: 0 ?0x96 150?
+  int16_t mot = datain[11];
+  Serial.print("Motor-temp ");
+  Serial.println(mot);
+
+  // muestra Throttle-PWM  0x01-1% , data range: 0 ? 0x64  100% output
+  int16_t tpwm = datain[12];
+  Serial.print("Throttle-PWM ");
+  Serial.println(tpwm);
+
+  // muestra Estado-H
+  int16_t esth = datain[13];
+  Serial.print("Estado-H ");
+  Serial.print(esth);
+
+  switch (esth)
+  {
+  case 0x01:
+    Serial.println(" Short-circuit protection");
+    break;
+  case 0x02:
+    Serial.println(" motor wire break");
+    break;
+  case 0x04:
+    Serial.println(" PPM TH loss protection");
+    break;
+  case 0x08:
+    Serial.println(" Power on TH is not zero");
+    break;
+  case 0x10:
+    Serial.println(" Low-voltage protection");
+    break;
+  case 0x20:
+    Serial.println(" Temperature protection");
+    break;
+  case 0x40:
+    Serial.println(" Start locked-rotor");
+    break;
+  case 0x80:
+    Serial.println(" Current protection");
+    break;
+
+  default:
+    Serial.println(" OK");
+    break;
+  }
+
+  // muestra Estado-L
+  int16_t estL = datain[14];
+  Serial.print("Estado-L ");
+  Serial.print(estL);
+
+  switch (estL)
+  {
+  case 0x01:
+    Serial.println(" PPM throttle is not within the regulated range, the PPM throttle is in an abnormal state, and the throttle is not within 700us~2500us");
+    break;
+  case 0x02:
+    Serial.println(" UART Throttle is not within the regulated range, UART throttle is in an abnormal state, the throttle value exceeds 1000");
+    break;
+  case 0x04:
+    Serial.println(" UART throttle loss, UART TH loss");
+    break;
+  case 0x08:
+    Serial.println(" CAN throttle loss, CAN TH loss");
+    break;
+  case 0x10:
+    Serial.println(" the battery voltage is not within the regulated range");
+    break;
+
+  default:
+    Serial.println(" OK");
+    break;
+  }
+
+  // muestra Mah-used value of the used/consumed power
+  int16_t mAu = datain[15] * 256 + datain[16];
+  Serial.print("Mah-used ");
+  Serial.println(mAu);
+
+  // muestra UART-TH  serial throttle input
+  int16_t uarth = datain[17];
+  Serial.print("UART-TH ");
+  Serial.println(uarth);
+
+  // muestra CAN-TH  can throttle
+  int16_t canth = datain[18];
+  Serial.print("CAN-TH ");
+  Serial.println(canth);
+
+  // muestra BEC voltage  (0-25V)
+  int16_t bec = datain[19];
+  Serial.print("BEC voltage ");
+  Serial.println(bec);
 }
